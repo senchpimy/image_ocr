@@ -1,10 +1,17 @@
 use eframe::egui;
 use image::ImageEncoder;
 use image::{DynamicImage, RgbaImage};
+use lazy_static::lazy_static;
 use libwayshot::WayshotConnection;
 use rusty_tesseract::{Args, Image as TessImage};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use tokio::runtime::Runtime;
+
+mod ollama;
+
+lazy_static! {
+    static ref TOKIO_RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
+}
 
 #[derive(Debug, Clone)]
 struct OcrWord {
@@ -19,7 +26,10 @@ struct ScreenshotApp {
     selection: Option<egui::Rect>,
     drag_start: Option<egui::Pos2>,
     ocr_results: Vec<OcrWord>,
+    ollama: ollama::OllamaClient,
     results: String,
+    is_ai_working: bool,
+    ai_result_receiver: Option<Receiver<String>>,
 }
 
 impl ScreenshotApp {
@@ -39,7 +49,71 @@ impl ScreenshotApp {
             selection: None,
             drag_start: None,
             ocr_results: Vec::new(),
+            ollama: ollama::OllamaClient::new(),
             results: String::new(),
+            is_ai_working: false,
+            ai_result_receiver: None,
+        }
+    }
+
+    fn start_image_recognition_with_ai(&mut self) {
+        if self.is_ai_working {
+            return;
+        }
+
+        if let Some(selection_rect) = self.selection {
+            let x = selection_rect.min.x.round() as u32;
+            let y = selection_rect.min.y.round() as u32;
+            let width = selection_rect.width().round() as u32;
+            let height = selection_rect.height().round() as u32;
+
+            let cropped_rgba =
+                image::imageops::crop_imm(&self.screenshot_image, x, y, width, height).to_image();
+            let mut image_bytes: Vec<u8> = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut image_bytes);
+            if encoder
+                .write_image(
+                    &cropped_rgba,
+                    cropped_rgba.width(),
+                    cropped_rgba.height(),
+                    image::ColorType::Rgba8.into(),
+                )
+                .is_err()
+            {
+                self.results = "Error: No se pudo codificar la imagen a PNG.".to_string();
+                return;
+            }
+
+            let (sender, receiver) = mpsc::channel();
+            self.ai_result_receiver = Some(receiver);
+            self.is_ai_working = true;
+
+            self.results = "Analizando imagen con IA...".to_string();
+            let ollama_clone = self.ollama.clone();
+            let owned_image_bytes = image_bytes.clone();
+            let owned_sender = sender.clone();
+
+            TOKIO_RUNTIME.spawn(async move {
+                ollama_clone
+                    .generate_stream(owned_image_bytes, owned_sender)
+                    .await;
+            });
+        }
+    }
+
+    fn poll_ai_result(&mut self) {
+        if let Some(receiver) = &self.ai_result_receiver {
+            for chunk in receiver.try_iter() {
+                if self.results == "Analizando imagen con IA..." {
+                    self.results.clear();
+                }
+                self.results.push_str(&chunk);
+            }
+
+            if let Err(TryRecvError::Disconnected) = receiver.try_recv() {
+                self.is_ai_working = false;
+                self.ai_result_receiver = None; // Cerramos el canal
+            }
         }
     }
 
@@ -60,13 +134,14 @@ impl ScreenshotApp {
                     .expect("No se pudo crear la imagen para Tesseract");
 
                 let tesseract_args = Args {
-                    lang: "eng".to_string(),
+                    lang: "jpn".to_string(),
                     psm: Some(6),
                     oem: Some(3),
                     dpi: Some(150),
                     ..Default::default()
                 };
 
+                println!("Ejecutando OCR en la selección...");
                 match rusty_tesseract::image_to_data(&tesseract_image, &tesseract_args) {
                     Ok(data) => {
                         println!("OCR completado. Parseando resultados...");
@@ -118,6 +193,11 @@ impl ScreenshotApp {
 
 impl eframe::App for ScreenshotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_ai_result();
+        if self.is_ai_working {
+            ctx.request_repaint();
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
             .show(ctx, |ui| {
@@ -223,6 +303,12 @@ impl eframe::App for ScreenshotApp {
                                     if ui.button("Recognize text (Tesseract)").clicked() {
                                         self.perform_ocr();
                                     }
+
+                                    ui.add_enabled_ui(!self.is_ai_working, |ui| {
+                                        if ui.button("Recognize with AI").clicked() {
+                                            self.start_image_recognition_with_ai();
+                                        }
+                                    });
 
                                     ui.add(
                                         egui::TextEdit::multiline(&mut self.results)
