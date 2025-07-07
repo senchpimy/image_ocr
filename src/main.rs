@@ -194,9 +194,6 @@ impl ScreenshotApp {
 impl eframe::App for ScreenshotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_ai_result();
-        if self.is_ai_working {
-            ctx.request_repaint();
-        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
@@ -326,6 +323,10 @@ impl eframe::App for ScreenshotApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+
+        if self.is_ai_working {
+            ctx.request_repaint();
+        }
     }
 }
 
