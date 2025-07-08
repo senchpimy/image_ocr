@@ -30,6 +30,7 @@ struct ScreenshotApp {
     results: String,
     is_ai_working: bool,
     ai_result_receiver: Option<Receiver<String>>,
+    tesseract_args: Args,
 }
 
 impl ScreenshotApp {
@@ -43,6 +44,14 @@ impl ScreenshotApp {
             color_image,
             egui::TextureOptions::LINEAR,
         );
+
+        let tesseract_args = Args {
+            lang: "jpn".to_string(),
+            psm: Some(6),
+            oem: Some(3),
+            dpi: Some(150),
+            ..Default::default()
+        };
         Self {
             screenshot_image: image,
             texture_handle,
@@ -53,6 +62,7 @@ impl ScreenshotApp {
             results: String::new(),
             is_ai_working: false,
             ai_result_receiver: None,
+            tesseract_args,
         }
     }
 
@@ -133,16 +143,8 @@ impl ScreenshotApp {
                 let tesseract_image = TessImage::from_dynamic_image(&cropped_dyn_image)
                     .expect("No se pudo crear la imagen para Tesseract");
 
-                let tesseract_args = Args {
-                    lang: "jpn".to_string(),
-                    psm: Some(6),
-                    oem: Some(3),
-                    dpi: Some(150),
-                    ..Default::default()
-                };
-
                 println!("Ejecutando OCR en la selección...");
-                match rusty_tesseract::image_to_data(&tesseract_image, &tesseract_args) {
+                match rusty_tesseract::image_to_data(&tesseract_image, &self.tesseract_args) {
                     Ok(data) => {
                         println!("OCR completado. Parseando resultados...");
                         self.ocr_results.clear();
@@ -219,6 +221,9 @@ impl eframe::App for ScreenshotApp {
 
                 if response.drag_stopped() {
                     self.drag_start = None;
+                    if self.ocr_results.is_empty() {
+                        self.perform_ocr();
+                    }
                 }
 
                 if let Some(selection_rect) = self.selection {
@@ -297,9 +302,63 @@ impl eframe::App for ScreenshotApp {
                             .fixed_pos(selection_rect.right_bottom() + egui::vec2(5.0, 5.0))
                             .show(ctx, |ui| {
                                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                                    if ui.button("Recognize text (Tesseract)").clicked() {
-                                        self.perform_ocr();
-                                    }
+                                    ui.collapsing("Tesseract Config", |ui| {
+                                        let mut selected_psm = self.tesseract_args.psm.unwrap_or(3); // valor por defecto
+                                        let mut selected_oem = self.tesseract_args.oem.unwrap_or(3); // valor por defecto
+                                        let mut dpi_str = self
+                                            .tesseract_args
+                                            .dpi
+                                            .map(|d| d.to_string())
+                                            .unwrap_or_else(|| "".to_string());
+
+                                        ui.label("PSM (Page Segmentation Mode):");
+                                        egui::ComboBox::from_id_source("psm_select")
+                                            .selected_text(format!("{}", selected_psm))
+                                            .show_ui(ui, |ui| {
+                                                for i in 0..=13 {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut selected_psm,
+                                                            i,
+                                                            format!("{}", i),
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        self.tesseract_args.psm =
+                                                            Some(selected_psm);
+                                                    }
+                                                }
+                                            });
+
+                                        ui.label("OEM (OCR Engine Mode):");
+                                        egui::ComboBox::from_id_source("oem_select")
+                                            .selected_text(format!("{}", selected_oem))
+                                            .show_ui(ui, |ui| {
+                                                for i in 0..=3 {
+                                                    if ui
+                                                        .selectable_value(
+                                                            &mut selected_oem,
+                                                            i,
+                                                            format!("{}", i),
+                                                        )
+                                                        .changed()
+                                                    {
+                                                        self.tesseract_args.oem =
+                                                            Some(selected_oem);
+                                                    }
+                                                }
+                                            });
+
+                                        ui.label("DPI (Dots Per Inch):");
+                                        if ui.text_edit_singleline(&mut dpi_str).changed() {
+                                            let dpi_val = dpi_str.parse::<i32>().ok();
+                                            self.tesseract_args.dpi = dpi_val;
+                                        }
+
+                                        if ui.button("Recognize text (Tesseract)").clicked() {
+                                            self.perform_ocr();
+                                        }
+                                    });
 
                                     ui.add_enabled_ui(!self.is_ai_working, |ui| {
                                         if ui.button("Recognize with AI").clicked() {
