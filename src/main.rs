@@ -305,11 +305,27 @@ impl eframe::App for ScreenshotApp {
                                     ui.collapsing("Tesseract Config", |ui| {
                                         let mut selected_psm = self.tesseract_args.psm.unwrap_or(3); // valor por defecto
                                         let mut selected_oem = self.tesseract_args.oem.unwrap_or(3); // valor por defecto
-                                        let mut dpi_str = self
-                                            .tesseract_args
-                                            .dpi
-                                            .map(|d| d.to_string())
-                                            .unwrap_or_else(|| "".to_string());
+                                        let cur_lang = &mut self.tesseract_args.lang;
+                                        let mut dpi_str = self.tesseract_args.dpi;
+
+                                        ui.label("Tesseract Lang");
+                                        let get_langs = rusty_tesseract::get_tesseract_langs(); //its
+                                        //calling this every frame
+                                        if let Ok(langs) = get_langs {
+                                            egui::ComboBox::from_id_source("lang_select")
+                                                .selected_text(format!("{}", &cur_lang))
+                                                .show_ui(ui, |ui| {
+                                                    for lang in langs {
+                                                        ui.selectable_value(
+                                                            cur_lang,
+                                                            format!("{}", &lang),
+                                                            lang,
+                                                        );
+                                                    }
+                                                });
+                                            //dbg!(&res);
+                                        }
+                                        //ui.text_edit_singleline(lang);
 
                                         ui.label("PSM (Page Segmentation Mode):");
                                         egui::ComboBox::from_id_source("psm_select")
@@ -349,10 +365,15 @@ impl eframe::App for ScreenshotApp {
                                                 }
                                             });
 
-                                        ui.label("DPI (Dots Per Inch):");
-                                        if ui.text_edit_singleline(&mut dpi_str).changed() {
-                                            let dpi_val = dpi_str.parse::<i32>().ok();
-                                            self.tesseract_args.dpi = dpi_val;
+                                        let mut dpi_float = dpi_str.unwrap() as f32;
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(&mut dpi_float, 50.0..=300.0)
+                                                    .suffix("dpi"),
+                                            )
+                                            .changed()
+                                        {
+                                            self.tesseract_args.dpi = Some(dpi_float as i32);
                                         }
 
                                         if ui.button("Recognize text (Tesseract)").clicked() {
