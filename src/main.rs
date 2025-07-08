@@ -31,6 +31,7 @@ struct ScreenshotApp {
     is_ai_working: bool,
     ai_result_receiver: Option<Receiver<String>>,
     tesseract_args: Args,
+    tesseract_langs: std::vec::Vec<String>,
 }
 
 impl ScreenshotApp {
@@ -52,6 +53,7 @@ impl ScreenshotApp {
             dpi: Some(150),
             ..Default::default()
         };
+        let tesseract_langs = rusty_tesseract::get_tesseract_langs().unwrap();
         Self {
             screenshot_image: image,
             texture_handle,
@@ -63,6 +65,7 @@ impl ScreenshotApp {
             is_ai_working: false,
             ai_result_receiver: None,
             tesseract_args,
+            tesseract_langs,
         }
     }
 
@@ -306,26 +309,20 @@ impl eframe::App for ScreenshotApp {
                                         let mut selected_psm = self.tesseract_args.psm.unwrap_or(3); // valor por defecto
                                         let mut selected_oem = self.tesseract_args.oem.unwrap_or(3); // valor por defecto
                                         let cur_lang = &mut self.tesseract_args.lang;
-                                        let mut dpi_str = self.tesseract_args.dpi;
+                                        let dpi_str = self.tesseract_args.dpi;
 
                                         ui.label("Tesseract Lang");
-                                        let get_langs = rusty_tesseract::get_tesseract_langs(); //its
-                                        //calling this every frame
-                                        if let Ok(langs) = get_langs {
-                                            egui::ComboBox::from_id_source("lang_select")
-                                                .selected_text(format!("{}", &cur_lang))
-                                                .show_ui(ui, |ui| {
-                                                    for lang in langs {
-                                                        ui.selectable_value(
-                                                            cur_lang,
-                                                            format!("{}", &lang),
-                                                            lang,
-                                                        );
-                                                    }
-                                                });
-                                            //dbg!(&res);
-                                        }
-                                        //ui.text_edit_singleline(lang);
+                                        egui::ComboBox::from_id_source("lang_select")
+                                            .selected_text(format!("{}", &cur_lang))
+                                            .show_ui(ui, |ui| {
+                                                for lang in &self.tesseract_langs {
+                                                    ui.selectable_value(
+                                                        cur_lang,
+                                                        format!("{}", &lang),
+                                                        lang,
+                                                    );
+                                                }
+                                            });
 
                                         ui.label("PSM (Page Segmentation Mode):");
                                         egui::ComboBox::from_id_source("psm_select")
