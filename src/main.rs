@@ -1,3 +1,4 @@
+use arboard::Clipboard;
 use eframe::egui;
 use image::ImageEncoder;
 use image::{DynamicImage, RgbaImage};
@@ -58,6 +59,7 @@ struct ScreenshotApp {
     ai_result_receiver: Option<Receiver<String>>,
     tesseract_args: Args,
     tesseract_langs: std::vec::Vec<String>,
+    clipboard: Clipboard,
 }
 
 impl ScreenshotApp {
@@ -71,6 +73,7 @@ impl ScreenshotApp {
             color_image,
             egui::TextureOptions::LINEAR,
         );
+        let clipboard = Clipboard::new().unwrap();
 
         let tesseract_args = Args {
             lang: "eng".to_string(),
@@ -93,6 +96,7 @@ impl ScreenshotApp {
             ai_result_receiver: None,
             tesseract_args,
             tesseract_langs,
+            clipboard,
         }
     }
 
@@ -106,6 +110,10 @@ impl ScreenshotApp {
             let y = sel.min.y.round() as u32;
             let width = sel.width().round() as u32;
             let height = sel.height().round() as u32;
+
+            if width == 0 || height == 0 {
+                return;
+            }
 
             let cropped_rgba =
                 image::imageops::crop_imm(&self.screenshot_image, x, y, width, height).to_image();
@@ -360,17 +368,19 @@ impl eframe::App for ScreenshotApp {
                         }
                     }
 
-                    for word in &self.ocr_results {
-                        let word_rect = word.bbox.size();
-                        let screen_bbox = egui::Rect::from_min_size(
-                            selection_rect.min + word.bbox.min.to_vec2(),
-                            word_rect,
-                        );
-                        painter.rect_stroke(
-                            screen_bbox,
-                            0.0,
-                            egui::Stroke::new(2.0, egui::Color32::GREEN),
-                        );
+                    if self.drag_mode == DragMode::None {
+                        for word in &self.ocr_results {
+                            let word_rect = word.bbox.size();
+                            let screen_bbox = egui::Rect::from_min_size(
+                                selection_rect.min + word.bbox.min.to_vec2(),
+                                word_rect,
+                            );
+                            painter.rect_stroke(
+                                screen_bbox,
+                                0.0,
+                                egui::Stroke::new(2.0, egui::Color32::GREEN),
+                            );
+                        }
                     }
 
                     if self.drag_mode == DragMode::None {
@@ -450,6 +460,14 @@ impl eframe::App for ScreenshotApp {
                                             self.start_image_recognition_with_ai();
                                         }
                                     });
+
+                                    if !self.results.is_empty() {
+                                        if ui.button("📋 Copiar Texto").clicked() {
+                                            //self.clipboard.set_text(self.results.clone()).unwrap();
+                                            self.clipboard.set_text("AAAAA".to_string()).unwrap();
+                                        }
+                                    }
+
                                     ui.add(
                                         egui::TextEdit::multiline(&mut self.results)
                                             .font(egui::TextStyle::Monospace)
