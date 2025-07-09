@@ -35,9 +35,7 @@ Requisitos:
 * [`ollama`](https://ollama.com) instalado y corriendo
 
 ```bash
-git clone https://github.com/tu_usuario/ocr.git
-cd ocr
-sudo apt install tesseract-ocr libclang-dev
+cd image_ocr
 cargo run --release
 ```
 
