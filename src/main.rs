@@ -464,7 +464,11 @@ impl eframe::App for ScreenshotApp {
                                     if !self.results.is_empty() {
                                         if ui.button("📋 Copiar Texto").clicked() {
                                             //self.clipboard.set_text(self.results.clone()).unwrap();
-                                            self.clipboard.set_text("AAAAA".to_string()).unwrap();
+                                            let r = self
+                                                .clipboard
+                                                .set_text("AAAAA".to_string())
+                                                .unwrap();
+                                            dbg!(r);
                                         }
                                     }
 
@@ -493,7 +497,6 @@ impl eframe::App for ScreenshotApp {
 }
 
 fn main() -> Result<(), eframe::Error> {
-    println!("Tomando captura de pantalla...");
     let wayshot_connection =
         WayshotConnection::new().expect("No se pudo conectar al servidor Wayland.");
     let screenshot = wayshot_connection
@@ -503,7 +506,6 @@ fn main() -> Result<(), eframe::Error> {
     let raw_buffer = screenshot.into_raw();
     let screenshot_app_image = image::RgbaImage::from_raw(width, height, raw_buffer)
         .expect("No se pudo convertir el búfer.");
-    println!("Captura tomada. Iniciando editor...");
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_decorations(false)
@@ -511,7 +513,7 @@ fn main() -> Result<(), eframe::Error> {
         ..Default::default()
     };
     eframe::run_native(
-        "Editor de Captura con OCR",
+        "OCR",
         native_options,
         Box::new(|cc| Box::new(ScreenshotApp::new(cc, screenshot_app_image))),
     )
