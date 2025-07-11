@@ -1,7 +1,8 @@
 use arboard::Clipboard;
 use eframe::egui;
 use image::ImageEncoder;
-use image::{DynamicImage, RgbaImage};
+use image::imageops::FilterType;
+use image::{DynamicImage, GrayImage, RgbaImage};
 use lazy_static::lazy_static;
 use libwayshot::WayshotConnection;
 use rusty_tesseract::{Args, Image as TessImage};
@@ -46,6 +47,12 @@ struct OcrWord {
     bbox: egui::Rect,
 }
 
+#[derive(Debug, Clone)]
+struct OcrLine {
+    words: Vec<OcrWord>,
+    bbox: egui::Rect,
+}
+
 struct ScreenshotApp {
     screenshot_image: RgbaImage,
     texture_handle: egui::TextureHandle,
@@ -53,6 +60,7 @@ struct ScreenshotApp {
     drag_start: Option<egui::Pos2>,
     drag_mode: DragMode,
     ocr_results: Vec<OcrWord>,
+    ocr_lines: Vec<OcrLine>,
     ollama: ollama::OllamaClient,
     results: String,
     is_ai_working: bool,
@@ -90,6 +98,7 @@ impl ScreenshotApp {
             drag_start: None,
             drag_mode: DragMode::default(),
             ocr_results: Vec::new(),
+            ocr_lines: Vec::new(),
             ollama: ollama::OllamaClient::new(),
             results: String::new(),
             is_ai_working: false,
@@ -163,6 +172,117 @@ impl ScreenshotApp {
         }
     }
 
+    fn preprocess_image_for_ocr(image: &DynamicImage) -> DynamicImage {
+        let gray = image.to_luma8();
+
+        let mut binary = gray.clone();
+        image::imageops::contrast(&mut binary, 1.5);
+
+        let mut denoised = image::imageops::blur(&binary, 1.0);
+
+        for pixel in denoised.pixels_mut() {
+            if pixel.0[0] > 128 {
+                pixel.0[0] = 255;
+            } else {
+                pixel.0[0] = 0;
+            }
+        }
+
+        let scaled = image::DynamicImage::ImageLuma8(denoised).resize(
+            image.width() * 2,
+            image.height() * 2,
+            FilterType::Lanczos3,
+        );
+
+        scaled
+    }
+
+    fn group_words_into_lines(words: &[OcrWord]) -> Vec<OcrLine> {
+        let mut lines: Vec<OcrLine> = Vec::new();
+        let mut sorted_words = words.to_vec();
+        sorted_words.sort_by(|a, b| {
+            a.bbox
+                .min
+                .y
+                .partial_cmp(&b.bbox.min.y)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.bbox.min.x.partial_cmp(&b.bbox.min.x).unwrap())
+        });
+
+        let mut current_line: Vec<OcrWord> = Vec::new();
+        for word in sorted_words {
+            if current_line.is_empty() {
+                current_line.push(word);
+                continue;
+            }
+
+            let last_word = current_line.last().unwrap();
+            let y_diff = (word.bbox.min.y - last_word.bbox.max.y).abs();
+            let x_diff = word.bbox.min.x - last_word.bbox.max.x;
+
+            if y_diff < 50.0 && x_diff > -50.0 && x_diff < 50.0 {
+                current_line.push(word);
+            } else {
+                let min_x = current_line
+                    .iter()
+                    .map(|w| w.bbox.min.x)
+                    .fold(f32::INFINITY, f32::min);
+                let min_y = current_line
+                    .iter()
+                    .map(|w| w.bbox.min.y)
+                    .fold(f32::INFINITY, f32::min);
+                let max_x = current_line
+                    .iter()
+                    .map(|w| w.bbox.max.x)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let max_y = current_line
+                    .iter()
+                    .map(|w| w.bbox.max.y)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let line_bbox = egui::Rect::from_min_max(
+                    egui::pos2(min_x / 2.0, min_y / 2.0),
+                    egui::pos2(max_x / 2.0, max_y / 2.0),
+                );
+
+                lines.push(OcrLine {
+                    words: current_line,
+                    bbox: line_bbox,
+                });
+                current_line = vec![word];
+            }
+        }
+
+        if !current_line.is_empty() {
+            let min_x = current_line
+                .iter()
+                .map(|w| w.bbox.min.x)
+                .fold(f32::INFINITY, f32::min);
+            let min_y = current_line
+                .iter()
+                .map(|w| w.bbox.min.y)
+                .fold(f32::INFINITY, f32::min);
+            let max_x = current_line
+                .iter()
+                .map(|w| w.bbox.max.x)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let max_y = current_line
+                .iter()
+                .map(|w| w.bbox.max.y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let line_bbox = egui::Rect::from_min_max(
+                egui::pos2(min_x / 2.0, min_y / 2.0),
+                egui::pos2(max_x / 2.0, max_y / 2.0),
+            );
+
+            lines.push(OcrLine {
+                words: current_line,
+                bbox: line_bbox,
+            });
+        }
+
+        lines
+    }
+
     fn perform_ocr(&mut self) {
         if let Some(selection_rect) = self.selection {
             let sel = selection_rect.normalized();
@@ -176,7 +296,10 @@ impl ScreenshotApp {
                     image::imageops::crop_imm(&self.screenshot_image, x, y, width, height)
                         .to_image(),
                 );
-                let tesseract_image = TessImage::from_dynamic_image(&cropped_dyn_image)
+
+                let preprocessed_image = Self::preprocess_image_for_ocr(&cropped_dyn_image);
+
+                let tesseract_image = TessImage::from_dynamic_image(&preprocessed_image)
                     .expect("No se pudo crear la imagen para Tesseract");
 
                 println!("Ejecutando OCR en la selección...");
@@ -209,6 +332,20 @@ impl ScreenshotApp {
                                 }
                             }
                         }
+                        self.ocr_lines = Self::group_words_into_lines(&self.ocr_results);
+
+                        self.results = self
+                            .ocr_lines
+                            .iter()
+                            .map(|line| {
+                                line.words
+                                    .iter()
+                                    .map(|w| w.text.trim().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
                     }
                     Err(e) => eprintln!("Error de Tesseract: {:?}", e),
                 }
@@ -250,12 +387,14 @@ impl eframe::App for ScreenshotApp {
                             self.drag_start = Some(pos);
                             self.selection = Some(egui::Rect::from_min_size(pos, egui::Vec2::ZERO));
                             self.ocr_results.clear();
+                            self.ocr_lines.clear();
                         }
                     } else if let Some(pos) = pointer_pos {
                         self.drag_mode = DragMode::Creating;
                         self.drag_start = Some(pos);
                         self.selection = Some(egui::Rect::from_min_size(pos, egui::Vec2::ZERO));
                         self.ocr_results.clear();
+                        self.ocr_lines.clear();
                     }
                 }
 
@@ -369,23 +508,46 @@ impl eframe::App for ScreenshotApp {
                     }
 
                     if self.drag_mode == DragMode::None {
-                        for word in &self.ocr_results {
-                            let word_rect = word.bbox.size();
+                        for line in &self.ocr_lines {
                             let screen_bbox = egui::Rect::from_min_size(
-                                selection_rect.min + word.bbox.min.to_vec2(),
-                                word_rect,
+                                selection_rect.min + line.bbox.min.to_vec2(),
+                                line.bbox.size(),
+                            )
+                            .expand(2.0);
+
+                            painter.rect_filled(
+                                screen_bbox,
+                                5.0,
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50),
                             );
+
                             painter.rect_stroke(
                                 screen_bbox,
-                                0.0,
-                                egui::Stroke::new(2.0, egui::Color32::GREEN),
+                                5.0,
+                                egui::Stroke::new(1.0, egui::Color32::WHITE),
                             );
                         }
                     }
 
                     if self.drag_mode == DragMode::None {
+                        let mut menu_pos = selection_rect.right_bottom() + egui::vec2(5.0, 5.0);
+                        let menu_width = 350.0;
+                        let menu_height = 400.0;
+                        if menu_pos.x + menu_width > screen_rect.max.x {
+                            menu_pos.x = selection_rect.left() - menu_width - 5.0;
+                        }
+                        if menu_pos.y + menu_height > screen_rect.max.y {
+                            menu_pos.y = selection_rect.top() - menu_height - 5.0;
+                        }
+                        if menu_pos.x < screen_rect.min.x {
+                            menu_pos.x = selection_rect.right() + 5.0;
+                        }
+                        if menu_pos.y < screen_rect.min.y {
+                            menu_pos.y = selection_rect.bottom() + 5.0;
+                        }
+
                         egui::Area::new("context_menu".into())
-                            .fixed_pos(selection_rect.right_bottom() + egui::vec2(5.0, 5.0))
+                            .fixed_pos(menu_pos)
                             .show(ctx, |ui| {
                                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                                     ui.collapsing("Tesseract Config", |ui| {
@@ -463,12 +625,7 @@ impl eframe::App for ScreenshotApp {
 
                                     if !self.results.is_empty() {
                                         if ui.button("📋 Copiar Texto").clicked() {
-                                            //self.clipboard.set_text(self.results.clone()).unwrap();
-                                            let r = self
-                                                .clipboard
-                                                .set_text("AAAAA".to_string())
-                                                .unwrap();
-                                            dbg!(r);
+                                            self.clipboard.set_text(self.results.clone()).unwrap();
                                         }
                                     }
 
