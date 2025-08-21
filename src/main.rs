@@ -5,12 +5,13 @@ use image::{DynamicImage, RgbaImage};
 use lazy_static::lazy_static;
 use libwayshot::WayshotConnection;
 use rusty_tesseract::{Args, Image as TessImage};
-use std::io::{self, Write}; // AÑADIDO
-use std::process::{Command, Stdio}; // AÑADIDO
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use tokio::runtime::Runtime;
 
 mod ollama;
+mod gemini;
 
 lazy_static! {
     static ref TOKIO_RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
@@ -88,6 +89,7 @@ struct ScreenshotApp {
     ocr_results: Vec<OcrWord>,
     ocr_lines: Vec<OcrLine>,
     ollama: ollama::OllamaClient,
+   gemini: gemini::GeminiClient, 
     results: String,
     is_ai_working: bool,
     ai_result_receiver: Option<Receiver<String>>,
@@ -124,6 +126,7 @@ impl ScreenshotApp {
             ocr_results: Vec::new(),
             ocr_lines: Vec::new(),
             ollama: ollama::OllamaClient::new(),
+            gemini: gemini::GeminiClient::new(), // AÑADE ESTA LÍNEA
             results: String::new(),
             is_ai_working: false,
             ai_result_receiver: None,
@@ -175,6 +178,55 @@ impl ScreenshotApp {
             TOKIO_RUNTIME.spawn(async move {
                 ollama_clone
                     .generate_stream(owned_image_bytes, owned_sender)
+                    .await;
+            });
+        }
+    }
+
+    fn start_image_recognition_with_gemini(&mut self) {
+        if self.is_ai_working {
+            return;
+        }
+        if let Some(selection_rect) = self.selection {
+            let sel = selection_rect.normalized();
+            let x = sel.min.x.round() as u32;
+            let y = sel.min.y.round() as u32;
+            let width = sel.width().round() as u32;
+            let height = sel.height().round() as u32;
+
+            if width == 0 || height == 0 {
+                return;
+            }
+
+            let cropped_rgba =
+                image::imageops::crop_imm(&self.screenshot_image, x, y, width, height).to_image();
+            let mut image_bytes: Vec<u8> = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut image_bytes);
+            if encoder
+                .write_image(
+                    &cropped_rgba,
+                    cropped_rgba.width(),
+                    cropped_rgba.height(),
+                    image::ColorType::Rgba8.into(),
+                )
+                .is_err()
+            {
+                self.results = "Error: No se pudo codificar la imagen a PNG.".to_string();
+                return;
+            }
+
+            let (sender, receiver) = mpsc::channel();
+            self.ai_result_receiver = Some(receiver);
+            self.is_ai_working = true;
+            self.results = "Analizando imagen con Gemini...".to_string();
+            
+            let gemini_clone = self.gemini.clone();
+            let owned_image_bytes = image_bytes.clone();
+            let owned_sender = sender.clone();
+
+            TOKIO_RUNTIME.spawn(async move {
+                gemini_clone
+                    .generate(owned_image_bytes, owned_sender)
                     .await;
             });
         }
@@ -647,6 +699,9 @@ impl eframe::App for ScreenshotApp {
                                             self.start_image_recognition_with_ai();
                                         }
                                     });
+                                        if ui.button("Recognize with Gemini").clicked() {
+                                            self.start_image_recognition_with_gemini();
+                                        }
 
                                     if !self.results.is_empty() {
                                         if ui.button("Copiar Texto").clicked() {
