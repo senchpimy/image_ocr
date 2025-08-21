@@ -1,11 +1,12 @@
-use arboard::Clipboard;
 use eframe::egui;
 use image::ImageEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, GrayImage, RgbaImage};
+use image::{DynamicImage, RgbaImage};
 use lazy_static::lazy_static;
 use libwayshot::WayshotConnection;
 use rusty_tesseract::{Args, Image as TessImage};
+use std::io::{self, Write}; // AÑADIDO
+use std::process::{Command, Stdio}; // AÑADIDO
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use tokio::runtime::Runtime;
 
@@ -14,6 +15,31 @@ mod ollama;
 lazy_static! {
     static ref TOKIO_RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
 }
+
+fn copy_text_with_wl_copy(text: &str) -> io::Result<()> {
+    let mut child = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "Comando 'wl-copy' no encontrado. ¿Está instalado 'wl-clipboard'?",
+                )
+            } else {
+                e
+            }
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    
+    Ok(())
+}
+
 
 trait RectExt {
     fn normalized(&self) -> Self;
@@ -67,7 +93,6 @@ struct ScreenshotApp {
     ai_result_receiver: Option<Receiver<String>>,
     tesseract_args: Args,
     tesseract_langs: std::vec::Vec<String>,
-    clipboard: Clipboard,
 }
 
 impl ScreenshotApp {
@@ -81,7 +106,6 @@ impl ScreenshotApp {
             color_image,
             egui::TextureOptions::LINEAR,
         );
-        let clipboard = Clipboard::new().unwrap();
 
         let tesseract_args = Args {
             lang: "eng".to_string(),
@@ -105,7 +129,6 @@ impl ScreenshotApp {
             ai_result_receiver: None,
             tesseract_args,
             tesseract_langs,
-            clipboard,
         }
     }
 
@@ -533,11 +556,13 @@ impl eframe::App for ScreenshotApp {
                         let mut menu_pos = selection_rect.right_bottom() + egui::vec2(5.0, 5.0);
                         let menu_width = 350.0;
                         let menu_height = 400.0;
-                        if menu_pos.x + menu_width > screen_rect.max.x {
+                        if menu_pos.x + menu_width > screen_rect.max.x
+                            && menu_pos.y + menu_height > screen_rect.max.y
+                        {
                             menu_pos.x = selection_rect.left() - menu_width - 5.0;
                         }
                         if menu_pos.y + menu_height > screen_rect.max.y {
-                            menu_pos.y = selection_rect.top() - menu_height - 5.0;
+                            menu_pos.y = selection_rect.top() - (-menu_height) - 5.0;
                         }
                         if menu_pos.x < screen_rect.min.x {
                             menu_pos.x = selection_rect.right() + 5.0;
@@ -624,8 +649,11 @@ impl eframe::App for ScreenshotApp {
                                     });
 
                                     if !self.results.is_empty() {
-                                        if ui.button("📋 Copiar Texto").clicked() {
-                                            self.clipboard.set_text(self.results.clone()).unwrap();
+                                        if ui.button("Copiar Texto").clicked() {
+                                            if let Err(e) = copy_text_with_wl_copy(&self.results) {
+                                                eprintln!("Error al copiar al portapapeles: {}", e);
+                                                self.results = format!("Error al copiar: {}", e);
+                                            }
                                         }
                                     }
 
