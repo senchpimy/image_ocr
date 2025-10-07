@@ -10,8 +10,9 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use tokio::runtime::Runtime;
 
-mod ollama;
 mod gemini;
+mod ollama;
+mod paddle_client;
 
 lazy_static! {
     static ref TOKIO_RUNTIME: Runtime = Runtime::new().expect("Failed to create Tokio runtime");
@@ -37,10 +38,9 @@ fn copy_text_with_wl_copy(text: &str) -> io::Result<()> {
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes())?;
     }
-    
+
     Ok(())
 }
-
 
 trait RectExt {
     fn normalized(&self) -> Self;
@@ -96,6 +96,7 @@ struct ScreenshotApp {
     tesseract_args: Args,
     tesseract_langs: std::vec::Vec<String>,
     menu_anchor_pos: Option<egui::Pos2>,
+    paddle_client: paddle_client::PaddleClient,
 }
 
 impl ScreenshotApp {
@@ -128,6 +129,7 @@ impl ScreenshotApp {
             ocr_lines: Vec::new(),
             ollama: ollama::OllamaClient::new(),
             gemini: gemini::GeminiClient::new(),
+            paddle_client: paddle_client::PaddleClient::new(),
             results: String::new(),
             is_ai_working: false,
             ai_result_receiver: None,
@@ -141,11 +143,14 @@ impl ScreenshotApp {
         if self.menu_anchor_pos.is_none() {
             return;
         }
-    
+
         let mut menu_visible = true;
-        
+
         egui::Window::new("Actions")
-            .anchor(egui::Align2::LEFT_TOP, self.menu_anchor_pos.unwrap_or_default().to_vec2())
+            .anchor(
+                egui::Align2::LEFT_TOP,
+                self.menu_anchor_pos.unwrap_or_default().to_vec2(),
+            )
             .collapsible(false)
             .resizable(false)
             .title_bar(false)
@@ -160,7 +165,7 @@ impl ScreenshotApp {
                     });
                 });
                 ui.separator();
-    
+
                 ui.collapsing("Tesseract Config", |ui| {
                     let mut selected_psm = self.tesseract_args.psm.unwrap_or(3);
                     let mut selected_oem = self.tesseract_args.oem.unwrap_or(3);
@@ -178,7 +183,10 @@ impl ScreenshotApp {
                         .selected_text(format!("{}", selected_psm))
                         .show_ui(ui, |ui| {
                             for i in 0..=13 {
-                                if ui.selectable_value(&mut selected_psm, i, format!("{}", i)).changed() {
+                                if ui
+                                    .selectable_value(&mut selected_psm, i, format!("{}", i))
+                                    .changed()
+                                {
                                     self.tesseract_args.psm = Some(selected_psm);
                                 }
                             }
@@ -188,27 +196,37 @@ impl ScreenshotApp {
                         .selected_text(format!("{}", selected_oem))
                         .show_ui(ui, |ui| {
                             for i in 0..=3 {
-                                if ui.selectable_value(&mut selected_oem, i, format!("{}", i)).changed() {
+                                if ui
+                                    .selectable_value(&mut selected_oem, i, format!("{}", i))
+                                    .changed()
+                                {
                                     self.tesseract_args.oem = Some(selected_oem);
                                 }
                             }
                         });
                     let mut dpi_float = self.tesseract_args.dpi.unwrap_or(150) as f32;
-                    if ui.add(egui::Slider::new(&mut dpi_float, 50.0..=300.0).suffix("dpi")).changed() {
+                    if ui
+                        .add(egui::Slider::new(&mut dpi_float, 50.0..=300.0).suffix("dpi"))
+                        .changed()
+                    {
                         self.tesseract_args.dpi = Some(dpi_float as i32);
                     }
                     if ui.button("Recognize text (Tesseract)").clicked() {
                         self.perform_ocr();
                     }
                 });
-                
-                    if ui.button("Recognize with AI (Ollama)").clicked() {
-                        self.start_image_recognition_with_ai();
-                    }
-                    if ui.button("Recognize with Gemini").clicked() {
-                        self.start_image_recognition_with_gemini();
-                    }
-    
+                if ui.button("Recognize with PaddleOCR").clicked() {
+                    self.start_recognition_with_paddle();
+                }
+
+                if ui.button("Recognize with AI (Ollama)").clicked() {
+                    self.start_image_recognition_with_ai();
+                }
+
+                if ui.button("Recognize with Gemini").clicked() {
+                    self.start_image_recognition_with_gemini();
+                }
+
                 if !self.results.is_empty() {
                     if ui.button("Copy Text").clicked() {
                         if let Err(e) = copy_text_with_wl_copy(&self.results) {
@@ -217,7 +235,7 @@ impl ScreenshotApp {
                         }
                     }
                 }
-    
+
                 ui.add(
                     egui::TextEdit::multiline(&mut self.results)
                         .font(egui::TextStyle::Monospace)
@@ -227,9 +245,88 @@ impl ScreenshotApp {
                         .desired_width(300.0),
                 );
             });
-            
+
         if !menu_visible {
             self.menu_anchor_pos = None;
+        }
+    }
+    fn start_recognition_with_paddle(&mut self) {
+        if self.is_ai_working {
+            return;
+        }
+        if let Some(selection_rect) = self.selection {
+            let sel = selection_rect.normalized();
+            let x = sel.min.x.round() as u32;
+            let y = sel.min.y.round() as u32;
+            let width = sel.width().round() as u32;
+            let height = sel.height().round() as u32;
+
+            if width == 0 || height == 0 {
+                return;
+            }
+
+            let cropped_rgba =
+                image::imageops::crop_imm(&self.screenshot_image, x, y, width, height).to_image();
+            let mut image_bytes: Vec<u8> = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut image_bytes);
+            if encoder
+                .write_image(
+                    &cropped_rgba,
+                    cropped_rgba.width(),
+                    cropped_rgba.height(),
+                    image::ColorType::Rgba8.into(),
+                )
+                .is_err()
+            {
+                self.results = "Error: No se pudo codificar la imagen a PNG.".to_string();
+                return;
+            }
+
+            let (sender, receiver) = mpsc::channel();
+            //self.ai_result_receiver = Some(receiver);
+            //
+            self.ocr_results.clear();
+            self.results.clear();
+            self.is_ai_working = false;
+            //self.results = "Contactando al servidor de PaddleOCR...".to_string();
+
+            let paddle_clone = self.paddle_client.clone();
+            let owned_image_bytes = image_bytes;
+            let owned_sender = sender;
+
+            TOKIO_RUNTIME.spawn(async move {
+                paddle_clone
+                    .recognize(owned_image_bytes, owned_sender)
+                    .await;
+            });
+
+            let results = receiver.recv().unwrap();
+            for result in &results {
+                let points: Vec<egui::Pos2> = result
+                    .coordinates
+                    .iter()
+                    .map(|p| egui::pos2(p[0] * 2.0, p[1] * 2.0))
+                    .collect();
+                let bounding_box = egui::Rect::from_points(&points);
+                self.ocr_results.push(OcrWord {
+                    text: result.text.clone(),
+                    confidence: result.score,
+                    bbox: bounding_box,
+                })
+            }
+            self.ocr_lines = Self::group_words_into_lines(&self.ocr_results);
+            self.results = self
+                .ocr_lines
+                .iter()
+                .map(|line| {
+                    line.words
+                        .iter()
+                        .map(|w| w.text.trim().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
         }
     }
 
@@ -317,15 +414,13 @@ impl ScreenshotApp {
             self.ai_result_receiver = Some(receiver);
             self.is_ai_working = true;
             self.results = "Analizando imagen con IA...".to_string();
-            
+
             let gemini_clone = self.gemini.clone();
             let owned_image_bytes = image_bytes.clone();
             let owned_sender = sender.clone();
 
             TOKIO_RUNTIME.spawn(async move {
-                gemini_clone
-                    .generate(owned_image_bytes, owned_sender)
-                    .await;
+                gemini_clone.generate(owned_image_bytes, owned_sender).await;
             });
         }
     }
@@ -457,6 +552,7 @@ impl ScreenshotApp {
     }
 
     fn perform_ocr(&mut self) {
+        return;
         if let Some(selection_rect) = self.selection {
             let sel = selection_rect.normalized();
             let x = sel.min.x.round() as u32;
@@ -474,7 +570,7 @@ impl ScreenshotApp {
 
                 let tesseract_image = TessImage::from_dynamic_image(&preprocessed_image)
                     .expect("No se pudo crear la imagen para Tesseract");
-                
+
                 println!("Ejecutando OCR en la selección...");
                 match rusty_tesseract::image_to_data(&tesseract_image, &self.tesseract_args) {
                     Ok(data) => {
@@ -484,11 +580,11 @@ impl ScreenshotApp {
                             let columns: Vec<&str> = line.split('\t').collect();
                             if columns.len() == 12 {
                                 if let (Ok(confidence), Ok(x), Ok(y), Ok(w), Ok(h)) = (
-                                    columns[10].parse::<f32>(),
-                                    columns[6].parse::<f32>(),
-                                    columns[7].parse::<f32>(),
-                                    columns[8].parse::<f32>(),
-                                    columns[9].parse::<f32>(),
+                                    columns[10].parse::<f32>(), //Confianza
+                                    columns[6].parse::<f32>(),  //X
+                                    columns[7].parse::<f32>(),  //Y
+                                    columns[8].parse::<f32>(),  //width
+                                    columns[9].parse::<f32>(),  //height
                                 ) {
                                     let text = columns[11];
                                     if confidence > 10.0 && !text.trim().is_empty() {
@@ -578,13 +674,21 @@ impl eframe::App for ScreenshotApp {
                         match self.drag_mode {
                             DragMode::Creating => {
                                 if let Some(start_pos) = self.drag_start {
-                                    *selection = egui::Rect::from_two_pos(start_pos, pos); 
+                                    *selection = egui::Rect::from_two_pos(start_pos, pos);
                                 }
                             }
-                            DragMode::TopLeft => { *selection = egui::Rect::from_two_pos(pos, selection.right_bottom()) }
-                            DragMode::TopRight => { *selection = egui::Rect::from_two_pos(pos, selection.left_bottom()) }
-                            DragMode::BottomLeft => { *selection = egui::Rect::from_two_pos(pos, selection.right_top()) }
-                            DragMode::BottomRight => { *selection = egui::Rect::from_two_pos(pos, selection.left_top()) }
+                            DragMode::TopLeft => {
+                                *selection = egui::Rect::from_two_pos(pos, selection.right_bottom())
+                            }
+                            DragMode::TopRight => {
+                                *selection = egui::Rect::from_two_pos(pos, selection.left_bottom())
+                            }
+                            DragMode::BottomLeft => {
+                                *selection = egui::Rect::from_two_pos(pos, selection.right_top())
+                            }
+                            DragMode::BottomRight => {
+                                *selection = egui::Rect::from_two_pos(pos, selection.left_top())
+                            }
                             DragMode::None => {}
                         }
                     }
@@ -648,15 +752,27 @@ impl eframe::App for ScreenshotApp {
                     let corner_color = egui::Color32::from_rgb(255, 255, 255);
                     painter.circle_filled(selection_rect.left_top(), corner_radius, corner_color);
                     painter.circle_filled(selection_rect.right_top(), corner_radius, corner_color);
-                    painter.circle_filled(selection_rect.left_bottom(), corner_radius, corner_color);
-                    painter.circle_filled(selection_rect.right_bottom(), corner_radius, corner_color);
+                    painter.circle_filled(
+                        selection_rect.left_bottom(),
+                        corner_radius,
+                        corner_color,
+                    );
+                    painter.circle_filled(
+                        selection_rect.right_bottom(),
+                        corner_radius,
+                        corner_color,
+                    );
 
                     if self.drag_mode == DragMode::None {
                         if let Some(pos) = pointer_pos {
                             let handle_radius = 8.0;
-                            if selection_rect.left_top().distance(pos) < handle_radius || selection_rect.right_bottom().distance(pos) < handle_radius {
+                            if selection_rect.left_top().distance(pos) < handle_radius
+                                || selection_rect.right_bottom().distance(pos) < handle_radius
+                            {
                                 ctx.set_cursor_icon(egui::CursorIcon::ResizeNwSe);
-                            } else if selection_rect.right_top().distance(pos) < handle_radius || selection_rect.left_bottom().distance(pos) < handle_radius {
+                            } else if selection_rect.right_top().distance(pos) < handle_radius
+                                || selection_rect.left_bottom().distance(pos) < handle_radius
+                            {
                                 ctx.set_cursor_icon(egui::CursorIcon::ResizeNeSw);
                             }
                         }
@@ -667,9 +783,18 @@ impl eframe::App for ScreenshotApp {
                             let screen_bbox = egui::Rect::from_min_size(
                                 selection_rect.min + line.bbox.min.to_vec2(),
                                 line.bbox.size(),
-                            ).expand(2.0);
-                            painter.rect_filled(screen_bbox, 5.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50));
-                            painter.rect_stroke(screen_bbox, 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+                            )
+                            .expand(2.0);
+                            painter.rect_filled(
+                                screen_bbox,
+                                5.0,
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 50),
+                            );
+                            painter.rect_stroke(
+                                screen_bbox,
+                                5.0,
+                                egui::Stroke::new(1.0, egui::Color32::WHITE),
+                            );
                         }
                     }
 
