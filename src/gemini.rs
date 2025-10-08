@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::mpsc::Sender;
@@ -59,10 +59,17 @@ pub struct GeminiClient {
 
 impl GeminiClient {
     pub fn new() -> Self {
+        #[cfg(feature = "gemini_translate")]
+        let prompt =
+            "Traduce el texto en la imagen al español, solo responde con la traducción".to_string();
+
+        #[cfg(not(feature = "gemini_translate"))]
+        let prompt = "Extrae cualquier texto visible en esta imagen. Responde únicamente con el texto extraído.".to_string();
+
         Self {
             client: Client::new(),
-            model: "gemini-1.5-flash-latest".to_string(),
-            prompt: "Extrae cualquier texto visible en esta imagen. Responde únicamente con el texto extraído.".to_string(),
+            model: "gemini-2.5-flash-lite".to_string(),
+            prompt,
         }
     }
 
@@ -92,7 +99,9 @@ impl GeminiClient {
             self.model
         );
 
-        match self.client.post(&url)
+        match self
+            .client
+            .post(&url)
             .header("X-goog-api-key", API_KEY.trim())
             .header("Content-Type", "application/json")
             .json(&request_body)
@@ -103,7 +112,8 @@ impl GeminiClient {
                 if response.status().is_success() {
                     match response.json::<GeminiResponse>().await {
                         Ok(gemini_response) => {
-                            let text_result = gemini_response.candidates
+                            let text_result = gemini_response
+                                .candidates
                                 .get(0)
                                 .and_then(|c| c.content.parts.get(0))
                                 .map_or("".to_string(), |p| p.text.clone());
@@ -120,8 +130,12 @@ impl GeminiClient {
                     }
                 } else {
                     let status = response.status();
-                    let error_body = response.text().await.unwrap_or_else(|_| "Cuerpo del error ilegible".to_string());
-                    let error_msg = format!("[gemini.rs] Error de API: {} - {}", status, error_body);
+                    let error_body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Cuerpo del error ilegible".to_string());
+                    let error_msg =
+                        format!("[gemini.rs] Error de API: {} - {}", status, error_body);
                     eprintln!("{}", error_msg);
                     let _ = sender.send(error_msg);
                 }

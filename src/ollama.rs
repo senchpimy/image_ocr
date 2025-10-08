@@ -15,10 +15,17 @@ pub struct OllamaClient {
 
 impl OllamaClient {
     pub fn new() -> Self {
+        #[cfg(feature = "ollama_translate")]
+        let prompt =
+            "Traduce el texto en la imagen al español, solo responde con la traducción".to_string();
+
+        #[cfg(not(feature = "ollama_translate"))]
+        let prompt = "Extrae cualquier texto visible en esta imagen. Responde únicamente con el texto extraído.".to_string();
+
         OllamaClient {
             ollama: Ollama::default(),
-            model: "gemma3:4b".to_string(),
-            prompt: "Extrae cualquier texto visible en esta imagen. Responde únicamente con el texto extraído.".to_string(),
+            model: "gemma3:12b".to_string(),
+            prompt,
         }
     }
 

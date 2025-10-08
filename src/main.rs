@@ -4,14 +4,21 @@ use image::imageops::FilterType;
 use image::{DynamicImage, RgbaImage};
 use lazy_static::lazy_static;
 use libwayshot::WayshotConnection;
-use rusty_tesseract::{Args, Image as TessImage};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use tokio::runtime::Runtime;
 
+#[cfg(feature = "tesseract")]
+use rusty_tesseract::{Args, Image as TessImage};
+
+#[cfg(feature = "gemini")]
 mod gemini;
+
+#[cfg(feature = "ollama")]
 mod ollama;
+
+#[cfg(feature = "paddleocr")]
 mod paddle_client;
 
 lazy_static! {
@@ -70,7 +77,6 @@ enum DragMode {
 #[derive(Debug, Clone)]
 struct OcrWord {
     text: String,
-    confidence: f32,
     bbox: egui::Rect,
 }
 
@@ -88,15 +94,30 @@ struct ScreenshotApp {
     drag_mode: DragMode,
     ocr_results: Vec<OcrWord>,
     ocr_lines: Vec<OcrLine>,
-    ollama: ollama::OllamaClient,
-    gemini: gemini::GeminiClient,
     results: String,
-    is_ai_working: bool,
-    ai_result_receiver: Option<Receiver<String>>,
-    tesseract_args: Args,
-    tesseract_langs: std::vec::Vec<String>,
     menu_anchor_pos: Option<egui::Pos2>,
+
+    #[cfg(any(
+        feature = "ollama",
+        feature = "ollama_translate",
+        feature = "gemini",
+        feature = "paddleocr"
+    ))]
+    is_ai_working: bool,
+    #[cfg(any(feature = "ollama", feature = "ollama_translate", feature = "gemini"))]
+    ai_result_receiver: Option<Receiver<String>>,
+
+    #[cfg(feature = "ollama")]
+    ollama: ollama::OllamaClient,
+    #[cfg(feature = "gemini")]
+    gemini: gemini::GeminiClient,
+    #[cfg(feature = "paddleocr")]
     paddle_client: paddle_client::PaddleClient,
+
+    #[cfg(feature = "tesseract")]
+    tesseract_args: Args,
+    #[cfg(feature = "tesseract")]
+    tesseract_langs: std::vec::Vec<String>,
 }
 
 impl ScreenshotApp {
@@ -111,6 +132,7 @@ impl ScreenshotApp {
             egui::TextureOptions::LINEAR,
         );
 
+        #[cfg(feature = "tesseract")]
         let tesseract_args = Args {
             lang: "eng".to_string(),
             psm: Some(6),
@@ -118,7 +140,9 @@ impl ScreenshotApp {
             dpi: Some(150),
             ..Default::default()
         };
+        #[cfg(feature = "tesseract")]
         let tesseract_langs = rusty_tesseract::get_tesseract_langs().unwrap_or_default();
+
         Self {
             screenshot_image: image,
             texture_handle,
@@ -127,15 +151,25 @@ impl ScreenshotApp {
             drag_mode: DragMode::default(),
             ocr_results: Vec::new(),
             ocr_lines: Vec::new(),
-            ollama: ollama::OllamaClient::new(),
-            gemini: gemini::GeminiClient::new(),
-            paddle_client: paddle_client::PaddleClient::new(),
             results: String::new(),
-            is_ai_working: false,
-            ai_result_receiver: None,
-            tesseract_args,
-            tesseract_langs,
             menu_anchor_pos: None,
+
+            #[cfg(any(feature = "ollama", feature = "gemini", feature = "paddleocr"))]
+            is_ai_working: false,
+            #[cfg(any(feature = "ollama", feature = "gemini"))]
+            ai_result_receiver: None,
+
+            #[cfg(feature = "ollama")]
+            ollama: ollama::OllamaClient::new(),
+            #[cfg(feature = "gemini")]
+            gemini: gemini::GeminiClient::new(),
+            #[cfg(feature = "paddleocr")]
+            paddle_client: paddle_client::PaddleClient::new(),
+
+            #[cfg(feature = "tesseract")]
+            tesseract_args,
+            #[cfg(feature = "tesseract")]
+            tesseract_langs,
         }
     }
 
@@ -166,6 +200,7 @@ impl ScreenshotApp {
                 });
                 ui.separator();
 
+                #[cfg(feature = "tesseract")]
                 ui.collapsing("Tesseract Config", |ui| {
                     let mut selected_psm = self.tesseract_args.psm.unwrap_or(3);
                     let mut selected_oem = self.tesseract_args.oem.unwrap_or(3);
@@ -215,15 +250,29 @@ impl ScreenshotApp {
                         self.perform_ocr();
                     }
                 });
+
+                #[cfg(feature = "paddleocr")]
                 if ui.button("Recognize with PaddleOCR").clicked() {
                     self.start_recognition_with_paddle();
                 }
 
+                #[cfg(all(feature = "ollama", not(feature = "ollama_translate")))]
                 if ui.button("Recognize with AI (Ollama)").clicked() {
                     self.start_image_recognition_with_ai();
                 }
 
+                #[cfg(feature = "ollama_translate")]
+                if ui.button("Translate with Ollama").clicked() {
+                    self.start_image_recognition_with_ai();
+                }
+
+                #[cfg(all(feature = "gemini", not(feature = "gemini_translate")))]
                 if ui.button("Recognize with Gemini").clicked() {
+                    self.start_image_recognition_with_gemini();
+                }
+
+                #[cfg(feature = "gemini_translate")]
+                if ui.button("Translate with Gemini").clicked() {
                     self.start_image_recognition_with_gemini();
                 }
 
@@ -250,6 +299,8 @@ impl ScreenshotApp {
             self.menu_anchor_pos = None;
         }
     }
+
+    #[cfg(feature = "paddleocr")]
     fn start_recognition_with_paddle(&mut self) {
         if self.is_ai_working {
             return;
@@ -283,12 +334,9 @@ impl ScreenshotApp {
             }
 
             let (sender, receiver) = mpsc::channel();
-            //self.ai_result_receiver = Some(receiver);
-            //
             self.ocr_results.clear();
             self.results.clear();
             self.is_ai_working = false;
-            //self.results = "Contactando al servidor de PaddleOCR...".to_string();
 
             let paddle_clone = self.paddle_client.clone();
             let owned_image_bytes = image_bytes;
@@ -310,7 +358,6 @@ impl ScreenshotApp {
                 let bounding_box = egui::Rect::from_points(&points);
                 self.ocr_results.push(OcrWord {
                     text: result.text.clone(),
-                    confidence: result.score,
                     bbox: bounding_box,
                 })
             }
@@ -327,9 +374,11 @@ impl ScreenshotApp {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
+            println!("{}", self.results);
         }
     }
 
+    #[cfg(feature = "ollama")]
     fn start_image_recognition_with_ai(&mut self) {
         if self.is_ai_working {
             return;
@@ -378,6 +427,7 @@ impl ScreenshotApp {
         }
     }
 
+    #[cfg(feature = "gemini")]
     fn start_image_recognition_with_gemini(&mut self) {
         if self.is_ai_working {
             return;
@@ -425,6 +475,7 @@ impl ScreenshotApp {
         }
     }
 
+    #[cfg(any(feature = "ollama", feature = "gemini"))]
     fn poll_ai_result(&mut self) {
         if let Some(receiver) = &self.ai_result_receiver {
             for chunk in receiver.try_iter() {
@@ -440,6 +491,7 @@ impl ScreenshotApp {
         }
     }
 
+    #[cfg(feature = "tesseract")]
     fn preprocess_image_for_ocr(image: &DynamicImage) -> DynamicImage {
         let gray = image.to_luma8();
 
@@ -465,6 +517,7 @@ impl ScreenshotApp {
         scaled
     }
 
+    #[cfg(any(feature = "tesseract", feature = "paddleocr"))]
     fn group_words_into_lines(words: &[OcrWord]) -> Vec<OcrLine> {
         let mut lines: Vec<OcrLine> = Vec::new();
         let mut sorted_words = words.to_vec();
@@ -551,8 +604,8 @@ impl ScreenshotApp {
         lines
     }
 
+    #[cfg(feature = "tesseract")]
     fn perform_ocr(&mut self) {
-        return;
         if let Some(selection_rect) = self.selection {
             let sel = selection_rect.normalized();
             let x = sel.min.x.round() as u32;
@@ -580,18 +633,17 @@ impl ScreenshotApp {
                             let columns: Vec<&str> = line.split('\t').collect();
                             if columns.len() == 12 {
                                 if let (Ok(confidence), Ok(x), Ok(y), Ok(w), Ok(h)) = (
-                                    columns[10].parse::<f32>(), //Confianza
-                                    columns[6].parse::<f32>(),  //X
-                                    columns[7].parse::<f32>(),  //Y
-                                    columns[8].parse::<f32>(),  //width
-                                    columns[9].parse::<f32>(),  //height
+                                    columns[10].parse::<f32>(),
+                                    columns[6].parse::<f32>(),
+                                    columns[7].parse::<f32>(),
+                                    columns[8].parse::<f32>(),
+                                    columns[9].parse::<f32>(),
                                 ) {
                                     let text = columns[11];
                                     if confidence > 10.0 && !text.trim().is_empty() {
                                         self.results.push_str(&format!("{} ", text.trim()));
                                         self.ocr_results.push(OcrWord {
                                             text: text.to_string(),
-                                            confidence,
                                             bbox: egui::Rect::from_min_size(
                                                 egui::pos2(x, y),
                                                 egui::vec2(w, h),
@@ -625,6 +677,7 @@ impl ScreenshotApp {
 
 impl eframe::App for ScreenshotApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(any(feature = "ollama", feature = "gemini"))]
         self.poll_ai_result();
 
         egui::CentralPanel::default()
@@ -697,6 +750,7 @@ impl eframe::App for ScreenshotApp {
                 if response.drag_stopped() {
                     if let Some(selection) = &mut self.selection {
                         *selection = selection.normalized();
+                        #[cfg(feature = "tesseract")]
                         self.perform_ocr();
                     }
                     self.drag_mode = DragMode::None;
@@ -806,6 +860,7 @@ impl eframe::App for ScreenshotApp {
                 }
             });
 
+        #[cfg(any(feature = "ollama", feature = "gemini"))]
         if self.is_ai_working {
             ctx.request_repaint();
         }
