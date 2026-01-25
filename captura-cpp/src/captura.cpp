@@ -637,14 +637,14 @@ void CCaptura::drawMenu(cairo_t* cr, Vector2D pos) {
         int col = i % 2;
         m_vMenuButtons.push_back({
             defs[i].label, 
-            {pos.x + padding + col * (colWidth + gap), pos.y + 60 + row * (buttonHeight + gap)}, 
+            {pos.x + padding + col * (colWidth + gap), pos.y + padding + row * (buttonHeight + gap)}, 
             {(double)colWidth, (double)buttonHeight}, 
             defs[i].action
         });
     }
 
-    int buttonsEnd = 60 + ((defs.size() + 1) / 2) * (buttonHeight + gap);
-    int totalHeight = buttonsEnd + 160;
+    int buttonsEnd = padding + ((defs.size() + 1) / 2) * (buttonHeight + gap);
+    int totalHeight = buttonsEnd + 150;
 
     // Background shadow
     cairo_set_source_rgba(cr, 0, 0, 0, 0.4);
@@ -662,16 +662,8 @@ void CCaptura::drawMenu(cairo_t* cr, Vector2D pos) {
     drawRoundedRect(cr, pos.x, pos.y, width, totalHeight, borderRadius);
     cairo_stroke(cr);
 
-    // Header with Pango
     PangoLayout* layout = pango_cairo_create_layout(cr);
-    PangoFontDescription* font_desc = pango_font_description_from_string("Sans Bold 11");
-    pango_layout_set_font_description(layout, font_desc);
-    pango_font_description_free(font_desc);
-
-    cairo_set_source_rgb(cr, 0.9, 0.9, 0.95);
-    pango_layout_set_text(layout, "CAPTURA OCR", -1);
-    cairo_move_to(cr, pos.x + padding, pos.y + 20);
-    pango_cairo_show_layout(cr, layout);
+    PangoFontDescription* font_desc;
 
     // Buttons
     font_desc = pango_font_description_from_string("Sans 9");
