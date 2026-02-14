@@ -5,16 +5,22 @@
 #include <sstream>
 
 CGeminiOCR::CGeminiOCR() {
-    char* envKey = getenv("GEMINI_API_KEY");
-    if (envKey) {
-        m_sApiKey = envKey;
-    } else {
-        std::vector<std::string> paths = {"gemini", "../gemini", "../../gemini"};
-        for (const auto& path : paths) {
-            std::ifstream ifs(path);
-            if (ifs.is_open()) {
-                std::getline(ifs, m_sApiKey);
-                if (!m_sApiKey.empty()) break;
+#ifdef GEMINI_API_KEY_VAL
+    m_sApiKey = GEMINI_API_KEY_VAL;
+#endif
+
+    if (m_sApiKey.empty()) {
+        char* envKey = getenv("GEMINI_API_KEY");
+        if (envKey) {
+            m_sApiKey = envKey;
+        } else {
+            std::vector<std::string> paths = {"gemini", "../gemini", "../../gemini"};
+            for (const auto& path : paths) {
+                std::ifstream ifs(path);
+                if (ifs.is_open()) {
+                    std::getline(ifs, m_sApiKey);
+                    if (!m_sApiKey.empty()) break;
+                }
             }
         }
     }
@@ -43,10 +49,11 @@ std::vector<SOCRResult> CGeminiOCR::recognize(const std::vector<unsigned char>& 
     Json::Value parts(Json::arrayValue);
     
     Json::Value partText;
-    if (m_bTranslate)
-        partText["text"] = "Traduce el texto en la imagen al español, solo responde con la traducción";
-    else
-        partText["text"] = "Extrae cualquier texto visible en esta imagen. Responde únicamente con el texto extraído.";
+   // if (m_bTranslate)
+   //     partText["text"] = "Traduce el texto en la imagen al español, solo responde con la traducción";
+   // else
+   //     partText["text"] = "Extrae cualquier texto visible en esta imagen. Responde únicamente con el texto extraído.";
+    partText["text"] = "Traduce el texto en la imagen al español, solo responde con la traducción";
     parts.append(partText);
     
     Json::Value partImage;

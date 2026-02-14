@@ -1,12 +1,65 @@
 import numpy as np
-from paddleocr import PaddleOCR
 import socket
 import struct
 import cv2
 import os
-from paddlex.inference.pipelines.ocr.result import OCRResult
 import json
+import argparse
 
+# Parse arguments
+parser = argparse.ArgumentParser(description='Servidor OCR')
+parser.add_argument('--model', type=str, choices=['paddle', 'lighton'], default='paddle', help='Modelo OCR a utilizar')
+args = parser.parse_args()
+
+# Global OCR object
+ocr_engine = None
+
+def init_ocr():
+    global ocr_engine
+    if args.model == 'paddle':
+        from paddleocr import PaddleOCR
+        print("Cargando PaddleOCR...")
+        ocr_engine = PaddleOCR(
+            lang="es",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False
+        )
+    else:
+        from transformers import AutoProcessor, AutoModelForVision2Seq
+        import torch
+        print("Cargando LightOnOCR-2-1B...")
+        model_id = "lightonai/LightOnOCR-2-1B"
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        dtype = torch.float16 if device == "cuda" else torch.float32
+        model = AutoModelForVision2Seq.from_pretrained(
+            model_id, 
+            trust_remote_code=True,
+            torch_dtype=dtype
+        ).to(device)
+        model.eval()
+        ocr_engine = (model, processor)
+
+def do_ocr(img_np):
+    if args.model == 'paddle':
+        result = ocr_engine.predict(input=img_np)
+        if result and result[0] is not None:
+            return result[0].json
+        return {}
+    else:
+        model, processor = ocr_engine
+        from PIL import Image
+        import torch
+        img_rgb = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(img_rgb)
+        inputs = processor(images=image, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=1536, do_sample=False)
+        ocr_text = processor.decode(outputs[0], skip_special_tokens=True)
+        return {"text": ocr_text}
+
+init_ocr()
 
 def recvall(sock, n):
     """Recibe exactamente 'n' bytes del socket 'sock'."""
@@ -19,12 +72,12 @@ def recvall(sock, n):
     return bytes(data)
 
 
-ocr = PaddleOCR(
-    lang="es",
-    use_doc_orientation_classify=False,
-    use_doc_unwarping=False,
-    use_textline_orientation=False
-)
+    #ocr = PaddleOCR(
+    #    lang="es",
+    #    use_doc_orientation_classify=False,
+    #    use_doc_unwarping=False,
+    #    use_textline_orientation=False
+    #)
 
 SOCKET_FILE = '/tmp/paddle_socket_unix'
 try:
@@ -62,18 +115,15 @@ while True:
             img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
             if img_np is None:
-                response_text = 'ERROR: IMAGEN INVALIDA'
+                response_data = json.dumps({"error": "IMAGEN INVALIDA"})
             else:
-                result = ocr.predict(input=img_np)
-                detected_texts = []
-            if result and result[0] is not None:
-                ocr_dict_output = result[0].json
-                response_data = json.dumps(ocr_dict_output, ensure_ascii=False)
-                print("Enviando respuesta JSON válida.")
-
-            else:
-                print("No se detectó texto. Enviando respuesta vacía.")
-                response_data = json.dumps({})
+                try:
+                    res = do_ocr(img_np)
+                    response_data = json.dumps(res, ensure_ascii=False)
+                    print(f"Respuesta de {args.model} enviada.")
+                except Exception as e:
+                    print(f"Error en OCR ({args.model}): {e}")
+                    response_data = json.dumps({"error": str(e)})
 
             response_bytes = response_data.encode('utf-8')
 
